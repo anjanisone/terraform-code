@@ -3,17 +3,12 @@ terraform {
 }
 
 provider "azurerm" {
-  version = "~>2.5" //outbound_type https://github.com/terraform-providers/terraform-provider-azurerm/blob/v2.5.0/CHANGELOG.md
+  version = "=2.8.0"
   features {}
 }
 
-resource "azurerm_resource_group" "vnet" {
+resource "azurerm_resource_group" "dev-api-rg" {
   name     = var.vnet_resource_group_name
-  location = var.location
-}
-
-resource "azurerm_resource_group" "kube" {
-  name     = var.kube_resource_group_name
   location = var.location
 }
 
@@ -79,6 +74,8 @@ module "routetable" {
   firewal_private_ip = module.firewall.fw_private_ip
   subnet_id          = module.kube_network.subnet_ids["aks-subnet"]
 }
+
+
 
 resource "azurerm_kubernetes_cluster" "privateaks" {
   name                    = "private-aks"
