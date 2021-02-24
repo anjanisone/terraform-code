@@ -12,12 +12,12 @@ resource "azurerm_resource_group" "dev-api-rg" {
   location = var.location
 }
 
-module "hub_network" {
+module "bastion_network" {
   source              = "./modules/vnet"
-  resource_group_name = azurerm_resource_group.vnet.name
+  resource_group_name = azurerm_resource_group.dev-api-rg.name
   location            = var.location
-  vnet_name           = var.hub_vnet_name
-  address_space       = ["10.0.0.0/22"]
+  vnet_name           = var.bastion_vnet_name
+  address_space       = ["10.0.4.0/22"]
   subnets = [
     {
       name : "AzureFirewallSubnet"
@@ -30,11 +30,11 @@ module "hub_network" {
   ]
 }
 
-module "kube_network" {
+module "aks_network" {
   source              = "./modules/vnet"
-  resource_group_name = azurerm_resource_group.kube.name
+  resource_group_name = azurerm_resource_group.dev-api-rg.name
   location            = var.location
-  vnet_name           = var.kube_vnet_name
+  vnet_name           = var.aks_vnet_name
   address_space       = ["10.0.4.0/22"]
   subnets = [
     {
@@ -46,50 +46,63 @@ module "kube_network" {
 
 module "vnet_peering" {
   source              = "./modules/vnet_peering"
-  vnet_1_name         = var.hub_vnet_name
-  vnet_1_id           = module.hub_network.vnet_id
-  vnet_1_rg           = azurerm_resource_group.vnet.name
-  vnet_2_name         = var.kube_vnet_name
-  vnet_2_id           = module.kube_network.vnet_id
-  vnet_2_rg           = azurerm_resource_group.kube.name
-  peering_name_1_to_2 = "HubToSpoke1"
-  peering_name_2_to_1 = "Spoke1ToHub"
+  vnet_1_name         = var.bastion_vnet_name
+  vnet_1_id           = module.bastion_network.vnet_id
+  vnet_1_rg           = azurerm_resource_group.dev-api-rg.name
+  vnet_2_name         = var.aks_vnet_name
+  vnet_2_id           = module.aks_network.vnet_id
+  vnet_2_rg           = azurerm_resource_group.dev-api-rg.name
+  peering_name_1_to_2 = "BastiontoAKS"
+  peering_name_2_to_1 = "AKStoBastion"
 }
 
 module "firewall" {
   source         = "./modules/firewall"
-  resource_group = azurerm_resource_group.vnet.name
+  resource_group = azurerm_resource_group.dev-api-rg.name
   location       = var.location
   pip_name       = "azureFirewalls-ip"
   fw_name        = "kubenetfw"
-  subnet_id      = module.hub_network.subnet_ids["AzureFirewallSubnet"]
+  subnet_id      = module.aks_network.subnet_ids["AzureFirewallSubnet"]
 }
 
 module "routetable" {
   source             = "./modules/route_table"
-  resource_group     = azurerm_resource_group.vnet.name
+  resource_group     = azurerm_resource_group.dev-api-rg.name
   location           = var.location
   rt_name            = "kubenetfw_fw_rt"
   r_name             = "kubenetfw_fw_r"
   firewal_private_ip = module.firewall.fw_private_ip
-  subnet_id          = module.kube_network.subnet_ids["aks-subnet"]
+  subnet_id          = module.bastion_network.subnet_ids["aks-subnet"]
+}
+
+module "storage_account" {
+  source            = "./modules/storage_account"
+  resource_group    = azurerm_resource_group.dev-api-rg.name
+  location          = var.location
+  sa_name           = "dev-api-storage_account"
+}
+
+backend "azurerm" {
+  resource_group_name = azurerm_resource_group.dev-api-rg.name
+  storage_account_name  = module.storage_account.name
+  container_name        = module.storage_account.container_name
+  key                   = "dev.terraform.state"
 }
 
 
-
-resource "azurerm_kubernetes_cluster" "privateaks" {
-  name                    = "private-aks"
+resource "azurerm_kubernetes_cluster" "dev-api-aks" {
+  name                    = "dev-api-aks"
   location                = var.location
   kubernetes_version      = var.kube_version
-  resource_group_name     = azurerm_resource_group.kube.name
-  dns_prefix              = "private-aks"
+  resource_group_name     = azurerm_resource_group.dev-api-rg.name
+  dns_prefix              = "dev-api-aks"
   private_cluster_enabled = true
 
   default_node_pool {
     name           = "default"
     node_count     = var.nodepool_nodes_count
     vm_size        = var.nodepool_vm_size
-    vnet_subnet_id = module.kube_network.subnet_ids["aks-subnet"]
+    vnet_subnet_id = module.bastion_network.subnet_ids["aks-subnet"]
   }
 
   identity {
@@ -109,16 +122,75 @@ resource "azurerm_kubernetes_cluster" "privateaks" {
 
 resource "azurerm_role_assignment" "netcontributor" {
   role_definition_name = "Network Contributor"
-  scope                = module.kube_network.subnet_ids["aks-subnet"]
+  scope                = module.bastion_network.subnet_ids["aks-subnet"]
   principal_id         = azurerm_kubernetes_cluster.privateaks.identity[0].principal_id
 }
 
 module "jumpbox" {
   source                  = "./modules/jumpbox"
   location                = var.location
-  resource_group          = azurerm_resource_group.vnet.name
-  vnet_id                 = module.hub_network.vnet_id
-  subnet_id               = module.hub_network.subnet_ids["jumpbox-subnet"]
+  resource_group          = azurerm_resource_group.dev-api-rg.name
+  vnet_id                 = module.aks_network.vnet_id
+  subnet_id               = module.aks_network.subnet_ids["jumpbox-subnet"]
   dns_zone_name           = join(".", slice(split(".", azurerm_kubernetes_cluster.privateaks.private_fqdn), 1, length(split(".", azurerm_kubernetes_cluster.privateaks.private_fqdn))))
   dns_zone_resource_group = azurerm_kubernetes_cluster.privateaks.node_resource_group
+}
+
+resource "azurerm_network_interface" "bastion_nic" {
+  name                = "dev-api-vm"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.dev-api-rg.name
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = module.aks_network.subnet_ids["jumpbox-subnet"]
+    private_ip_address_allocation = "Dynamic"
+  }
+}
+
+resource "azurerm_linux_virtual_machine" "example" {
+  name                            = "vm-bastion"
+  location                        = var.location
+  resource_group_name             = azurerm_resource_group.dev-api-rg.name
+  size                            = "Standard_D2_v2"
+  admin_username                  = var.bastion_admin.username
+  admin_password                  = var.bastion_admin.password
+  disable_password_authentication = false
+  network_interface_ids = [
+    azurerm_network_interface.bastion_nic.id,
+  ]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "UbuntuServer"
+    sku       = "16.04-LTS"
+    version   = "latest"
+  }
+}
+
+##
+# Create an Azure Bastion Service to access the Bastion VM
+##
+resource "azurerm_public_ip" "pip_azure_bastion" {
+  name                = "pip-azure-bastion"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.dev-api-rg.name
+
+  allocation_method = "Static"
+  sku               = "Standard"
+}
+
+resource "azurerm_bastion_host" "azure-bastion" {
+  name                = "azure-bastion"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.dev-api-rg.name
+  ip_configuration {
+    name                 = "configuration"
+    subnet_id            = azurerm_subnet.bastion_network.id
+    public_ip_address_id = azurerm_public_ip.pip_azure_bastion.id
+  }
 }
