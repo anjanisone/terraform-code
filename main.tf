@@ -89,6 +89,21 @@ backend "azurerm" {
   key                   = "dev.terraform.state"
 }
 
+resource "azuread_application" "dev-api-application" {
+  name                       = "dev-api-application"
+  homepage                   = "http://homepage"
+  identifier_uris            = ["http://uri"]
+  reply_urls                 = ["http://replyurl"]
+  available_to_other_tenants = false
+  oauth2_allow_implicit_flow = true
+}
+
+resource "azuread_service_principal" "dev-api-service-pricipal" {
+  application_id               = azuread_application.dev-api-application.application_id
+  app_role_assignment_required = false
+
+  tags = ["dev-api-application", "tags", "test-application-service-pricipal"]
+}
 
 resource "azurerm_kubernetes_cluster" "dev-api-aks" {
   name                    = "dev-api-aks"
